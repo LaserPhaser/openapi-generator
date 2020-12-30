@@ -8,9 +8,13 @@ from multiprocessing.pool import ThreadPool
 import io
 import os
 import re
+import dacite
 import typing
+import dataclasses
 from urllib.parse import quote
-
+from http import HTTPStatus
+import dataclasses
+from typing import get_args
 {{#tornado}}
 import tornado.gen
 {{/tornado}}
@@ -129,7 +133,8 @@ class ApiClient(object):
         _preload_content: bool = True,
         _request_timeout: typing.Optional[typing.Union[int, typing.Tuple]] = None,
         _host: typing.Optional[str] = None,
-        _check_type: typing.Optional[bool] = None
+        _check_type: typing.Optional[bool] = None,
+        expected_status_code=HTTPStatus.OK
     ):
 
         config = self.configuration
@@ -202,6 +207,10 @@ class ApiClient(object):
 
         return_data = response_data
 
+        assert response_data.status == expected_status_code, \
+            f'Expected status code: {expected_status_code} actual status code: {response_data.status}'
+
+
         if not _preload_content:
             {{^tornado}}
             return (return_data)
@@ -232,8 +241,10 @@ class ApiClient(object):
         if _return_http_data_only:
             return (return_data)
         else:
-            return (return_data, response_data.status,
-                    response_data.getheaders())
+            response_data.data = return_data
+            response_data.headers = response_data.getheaders()
+            return response_data
+
 {{/tornado}}
 {{#tornado}}
         if _return_http_data_only:
@@ -270,6 +281,8 @@ class ApiClient(object):
             return [cls.sanitize_for_serialization(item) for item in obj]
         if isinstance(obj, dict):
             return {key: cls.sanitize_for_serialization(val) for key, val in obj.items()}
+        if dataclasses.is_dataclass(obj):
+            return json.loads(obj.to_json())
         raise ApiValueError('Unable to prepare type {} for serialization'.format(obj.__class__.__name__))
 
     def deserialize(self, response, response_type, _check_type):
@@ -294,10 +307,10 @@ class ApiClient(object):
         """
         # handle file downloading
         # save response body into a tmp file and return the instance
-        if response_type == (file_type,):
-            content_disposition = response.getheader("Content-Disposition")
-            return deserialize_file(response.data, self.configuration,
-                                    content_disposition=content_disposition)
+        #if response_type == (file_type,):
+        #    content_disposition = response.getheader("Content-Disposition")
+        #    return deserialize_file(response.data, self.configuration,
+        #                            content_disposition=content_disposition)
 
         # fetch data from response object
         try:
@@ -307,14 +320,19 @@ class ApiClient(object):
 
         # store our data under the key of 'received_data' so users have some
         # context if they are deserializing a string and the data type is wrong
-        deserialized_data = validate_and_convert_types(
-            received_data,
-            response_type,
-            ['received_data'],
-            True,
-            _check_type,
-            configuration=self.configuration
-        )
+        if dataclasses.is_dataclass(response_type[0]):
+            deserialized_data = dacite.from_dict(data_class=response_type[0], data=received_data, config=dacite.Config(check_types=False))
+        elif dataclasses.is_dataclass(response_type[0].__args__[0]):
+            deserialized_data = [dacite.from_dict(data_class=response_type[0].__args__[0], data=data, config=dacite.Config(check_types=False)) for data in received_data]
+        else:
+            deserialized_data = validate_and_convert_types(
+                received_data,
+                response_type,
+                ['received_data'],
+                True,
+                _check_type,
+                configuration=self.configuration
+            )
         return deserialized_data
 
     def call_api(
@@ -335,7 +353,8 @@ class ApiClient(object):
         _preload_content: bool = True,
         _request_timeout: typing.Optional[typing.Union[int, typing.Tuple]] = None,
         _host: typing.Optional[str] = None,
-        _check_type: typing.Optional[bool] = None
+        _check_type: typing.Optional[bool] = None,
+        expected_status_code=HTTPStatus.OK
     ):
         """Makes the HTTP request (synchronous) and returns deserialized data.
 
@@ -397,7 +416,7 @@ class ApiClient(object):
                                    response_type, auth_settings,
                                    _return_http_data_only, collection_formats,
                                    _preload_content, _request_timeout, _host,
-                                   _check_type)
+                                   _check_type, expected_status_code )
 
         return self.pool.apply_async(self.__call_api, (resource_path,
                                                        method, path_params,
@@ -410,7 +429,7 @@ class ApiClient(object):
                                                        collection_formats,
                                                        _preload_content,
                                                        _request_timeout,
-                                                       _host, _check_type))
+                                                       _host, _check_type, expected_status_code))
 
     def request(self, method, url, query_params=None, headers=None,
                 post_params=None, body=None, _preload_content=True,
@@ -528,6 +547,7 @@ class ApiClient(object):
                         "for %s must be open." % param_name
                     )
                 filename = os.path.basename(file_instance.name)
+                file_instance.seek(0)
                 filedata = file_instance.read()
                 mimetype = (mimetypes.guess_type(filename)[0] or
                             'application/octet-stream')
@@ -661,6 +681,7 @@ class Endpoint(object):
         self.allowed_values = root_map['allowed_values']
         self.openapi_types = root_map['openapi_types']
         extra_types = {
+            'expected_status_code': (none_type, int),
             'async_req': (bool,),
             '_host_index': (none_type, int),
             '_preload_content': (bool,),
@@ -780,23 +801,23 @@ class Endpoint(object):
                 )
             _host = None
 
-        for key, value in kwargs.items():
-            if key not in self.params_map['all']:
-                raise ApiTypeError(
-                    "Got an unexpected parameter '%s'"
-                    " to method `%s`" %
-                    (key, self.settings['operation_id'])
-                )
+        #for key, value in kwargs.items():
+        #    if key not in self.params_map['all']:
+        #        raise ApiTypeError(
+        #            "Got an unexpected parameter '%s'"
+        #            " to method `%s`" %
+        #            (key, self.settings['operation_id'])
+        #        )
             # only throw this nullable ApiValueError if _check_input_type
             # is False, if _check_input_type==True we catch this case
             # in self.__validate_inputs
-            if (key not in self.params_map['nullable'] and value is None
-                    and kwargs['_check_input_type'] is False):
-                raise ApiValueError(
-                    "Value may not be None for non-nullable parameter `%s`"
-                    " when calling `%s`" %
-                    (key, self.settings['operation_id'])
-                )
+        #    if (key not in self.params_map['nullable'] and value is None
+        #            and kwargs['_check_input_type'] is False):
+        #        raise ApiValueError(
+        #            "Value may not be None for non-nullable parameter `%s`"
+        #            " when calling `%s`" %
+        #            (key, self.settings['operation_id'])
+        #        )
 
         for key in self.params_map['required']:
             if key not in kwargs.keys():
@@ -805,7 +826,7 @@ class Endpoint(object):
                     "`%s`" % (key, self.settings['operation_id'])
                 )
 
-        self.__validate_inputs(kwargs)
+        # self.__validate_inputs(kwargs)
 
         params = self.__gather_params(kwargs)
 
@@ -831,6 +852,7 @@ class Endpoint(object):
             response_type=self.settings['response_type'],
             auth_settings=self.settings['auth'],
             async_req=kwargs['async_req'],
+            expected_status_code=kwargs['expected_status_code'],
             _check_type=kwargs['_check_return_type'],
             _return_http_data_only=kwargs['_return_http_data_only'],
             _preload_content=kwargs['_preload_content'],

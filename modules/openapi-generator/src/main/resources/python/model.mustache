@@ -5,30 +5,12 @@
 import re  # noqa: F401
 import sys  # noqa: F401
 
-import nulltype  # noqa: F401
-
-from {{packageName}}.model_utils import (  # noqa: F401
-    ApiTypeError,
-    ModelComposed,
-    ModelNormal,
-    ModelSimple,
-    cached_property,
-    change_keys_js_to_python,
-    convert_js_args_to_python_args,
-    date,
-    datetime,
-    file_type,
-    none_type,
-    validate_get_composed_info,
-)
 {{#models}}
 {{#model}}
 {{#imports}}
 {{#-first}}
-
-def lazy_import():
 {{/-first}}
-    {{{.}}}
+{{{.}}}
 {{/imports}}
 
 
@@ -45,7 +27,7 @@ def lazy_import():
 {{^isArray}}
 {{^isEnum}}
 {{^isAlias}}
-{{> model_templates/model_normal }}
+{{> model_templates/model_dataclass }}
 {{/isAlias}}
 {{/isEnum}}
 {{/isArray}}
